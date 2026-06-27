@@ -4,6 +4,11 @@ use regex::Regex;
 
 use crate::{Error, ffi, str_ext::StrExt};
 
+/// A sandbox policy built as SBPL (Sandbox Profile Language) source.
+///
+/// Rules are added with a fluent builder: pick an action (`allow`/`deny`),
+/// then an operation, then a filter. The type parameters track the
+/// partially-built rule so only valid continuations compile.
 #[derive(Debug)]
 pub struct Sandbox<A = (), O = ()> {
     inner: String,
@@ -11,6 +16,7 @@ pub struct Sandbox<A = (), O = ()> {
 }
 
 impl Sandbox<(), ()> {
+    /// Start a policy that allows every operation unless a rule denies it.
     pub fn allow_by_default() -> Self {
         Self {
             inner: "(version 1)\n(allow default)\n".to_owned(),
@@ -18,6 +24,7 @@ impl Sandbox<(), ()> {
         }
     }
 
+    /// Start a policy that denies every operation unless a rule allows it.
     pub fn deny_by_default() -> Self {
         Self {
             inner: "(version 1)\n(deny default)\n".to_owned(),
@@ -25,6 +32,7 @@ impl Sandbox<(), ()> {
         }
     }
 
+    /// Begin an `allow` rule; chain an operation next.
     pub fn allow(self) -> Sandbox<Allow, ()> {
         Sandbox {
             inner: self.inner,
@@ -32,6 +40,7 @@ impl Sandbox<(), ()> {
         }
     }
 
+    /// Begin a `deny` rule; chain an operation next.
     pub fn deny(self) -> Sandbox<Deny, ()> {
         Sandbox {
             inner: self.inner,
@@ -39,19 +48,27 @@ impl Sandbox<(), ()> {
         }
     }
 
+    /// Return the policy as SBPL source text.
     pub fn to_sbpl(&self) -> &str {
         &self.inner
     }
 
+    /// Apply the policy to the current process.
+    ///
+    /// Returns an error if the kernel rejects the profile. The restriction
+    /// cannot be undone once it succeeds.
     pub fn init(self) -> Result<(), Error> {
         ffi::sandbox_init(&self.inner, 0)
     }
 }
 
+/// An SBPL rule action (`allow` or `deny`).
 pub trait Action {
+    /// The SBPL keyword for this action.
     fn sbpl() -> &'static str;
 }
 
+/// The `allow` action.
 pub struct Allow;
 
 impl Action for Allow {
@@ -60,6 +77,7 @@ impl Action for Allow {
     }
 }
 
+/// The `deny` action.
 pub struct Deny;
 
 impl Action for Deny {
@@ -70,9 +88,11 @@ impl Action for Deny {
 
 macro_rules! file_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain a path filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -82,6 +102,7 @@ macro_rules! file_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match a single exact path.
             pub fn literal(mut self, path: impl AsRef<Path>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -97,6 +118,7 @@ macro_rules! file_op {
                 }
             }
 
+            /// Match any path that starts with `path`.
             pub fn prefix(mut self, path: impl AsRef<Path>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -112,6 +134,7 @@ macro_rules! file_op {
                 }
             }
 
+            /// Match `path` and everything beneath it.
             pub fn subpath(mut self, path: impl AsRef<Path>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -127,6 +150,7 @@ macro_rules! file_op {
                 }
             }
 
+            /// Match paths against a regular expression.
             pub fn regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -142,6 +166,7 @@ macro_rules! file_op {
                 }
             }
 
+            /// Match the operation unconditionally (no path filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -155,9 +180,11 @@ macro_rules! file_op {
 
 macro_rules! mach_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain a port-name filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -167,6 +194,7 @@ macro_rules! mach_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match an exact global (system-wide) port name.
             pub fn global_name(mut self, name: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -182,6 +210,7 @@ macro_rules! mach_op {
                 }
             }
 
+            /// Match an exact local (per-process) port name.
             pub fn local_name(mut self, name: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -197,6 +226,7 @@ macro_rules! mach_op {
                 }
             }
 
+            /// Match global port names against a regular expression.
             pub fn global_name_regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -212,6 +242,7 @@ macro_rules! mach_op {
                 }
             }
 
+            /// Match local port names against a regular expression.
             pub fn local_name_regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -227,6 +258,7 @@ macro_rules! mach_op {
                 }
             }
 
+            /// Match the operation unconditionally (no name filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -240,9 +272,11 @@ macro_rules! mach_op {
 
 macro_rules! ipc_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain a name filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -252,6 +286,7 @@ macro_rules! ipc_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match an exact POSIX IPC name.
             pub fn name(mut self, name: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -267,6 +302,7 @@ macro_rules! ipc_op {
                 }
             }
 
+            /// Match POSIX IPC names against a regular expression.
             pub fn regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -282,6 +318,7 @@ macro_rules! ipc_op {
                 }
             }
 
+            /// Match the operation unconditionally (no name filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -295,9 +332,11 @@ macro_rules! ipc_op {
 
 macro_rules! sysctl_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain a sysctl-name filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -307,6 +346,7 @@ macro_rules! sysctl_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match an exact sysctl name.
             pub fn name(mut self, name: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -322,6 +362,7 @@ macro_rules! sysctl_op {
                 }
             }
 
+            /// Match sysctl names against a regular expression.
             pub fn regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -337,6 +378,7 @@ macro_rules! sysctl_op {
                 }
             }
 
+            /// Match the operation unconditionally (no name filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -350,9 +392,11 @@ macro_rules! sysctl_op {
 
 macro_rules! iokit_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain an IOKit filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -362,6 +406,7 @@ macro_rules! iokit_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match an exact IOKit user-client class name.
             pub fn user_client_class(mut self, class: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -377,6 +422,7 @@ macro_rules! iokit_op {
                 }
             }
 
+            /// Match IOKit user-client class names against a regular expression.
             pub fn user_client_class_regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -392,6 +438,7 @@ macro_rules! iokit_op {
                 }
             }
 
+            /// Match an exact IOKit property name.
             pub fn property(mut self, prop: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -407,6 +454,7 @@ macro_rules! iokit_op {
                 }
             }
 
+            /// Match IOKit property names against a regular expression.
             pub fn property_regex(mut self, regex: Regex) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -422,6 +470,7 @@ macro_rules! iokit_op {
                 }
             }
 
+            /// Match the operation unconditionally (no filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -435,9 +484,11 @@ macro_rules! iokit_op {
 
 macro_rules! network_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain an endpoint filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -447,6 +498,7 @@ macro_rules! network_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match a local endpoint by protocol and `host:port` address.
             pub fn local(mut self, proto: Proto, address: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -463,6 +515,7 @@ macro_rules! network_op {
                 }
             }
 
+            /// Match a remote endpoint by protocol and `host:port` address.
             pub fn remote(mut self, proto: Proto, address: impl AsRef<str>) -> Sandbox<(), ()> {
                 writeln!(
                     self.inner,
@@ -479,6 +532,7 @@ macro_rules! network_op {
                 }
             }
 
+            /// Match the operation unconditionally (no endpoint filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -492,9 +546,11 @@ macro_rules! network_op {
 
 macro_rules! signal_op {
     ($method:ident, $marker:ident, $sbpl:literal) => {
+        #[doc = concat!("Filter marker for the `", $sbpl, "` operation.")]
         pub struct $marker;
 
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Target the `", $sbpl, "` operation; chain a target filter next.")]
             pub fn $method(self) -> Sandbox<A, $marker> {
                 Sandbox {
                     inner: self.inner,
@@ -504,6 +560,7 @@ macro_rules! signal_op {
         }
 
         impl<A: Action> Sandbox<A, $marker> {
+            /// Match signals sent to the process itself.
             pub fn self_target(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {} (target self))", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -512,6 +569,7 @@ macro_rules! signal_op {
                 }
             }
 
+            /// Match signals sent to other processes.
             pub fn others(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {} (target others))", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -520,6 +578,7 @@ macro_rules! signal_op {
                 }
             }
 
+            /// Match the operation unconditionally (no target filter).
             pub fn any(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -534,6 +593,7 @@ macro_rules! signal_op {
 macro_rules! bare_op {
     ($method:ident, $sbpl:literal) => {
         impl<A: Action> Sandbox<A, ()> {
+            #[doc = concat!("Add a rule for the unfiltered `", $sbpl, "` operation.")]
             pub fn $method(mut self) -> Sandbox<(), ()> {
                 writeln!(self.inner, "({} {})", A::sbpl(), $sbpl).unwrap();
                 Sandbox {
@@ -673,10 +733,14 @@ fn regex_str(r: &Regex) -> String {
     r.as_str().replace('"', "\\\"")
 }
 
+/// Transport protocol for a network endpoint filter.
 #[derive(Debug, Clone)]
 pub enum Proto {
+    /// Any IP traffic.
     Ip,
+    /// TCP traffic.
     Tcp,
+    /// UDP traffic.
     Udp,
 }
 
