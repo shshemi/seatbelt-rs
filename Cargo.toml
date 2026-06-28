@@ -2,6 +2,12 @@
 name = "seatbelt-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A small, type-safe Rust wrapper for macOS API."
+license = "MIT"
+repository = "https://github.com/shshemi/seatbelt-rs"
+readme = "README.md"
+keywords = ["sandbox", "seatbelt", "sbpl", "macos", "security"]
+categories = ["os::macos-apis", "api-bindings"]
 
 [dependencies]
 regex = "1.12.4"
